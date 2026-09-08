@@ -1,0 +1,10 @@
+{
+  "id": "20260907-095651-test",
+  "command": "test",
+  "created": "2026-09-07 09:56:51",
+  "method": "mergecfg",
+  "release": "release-20260907-095538.cf",
+  "objects": "objects-20260907-095519.xml",
+  "settings": "MergeSettings-20260907-095538.xml",
+  "comment": "Задача #123: сервис поиска по номеру документа, контракт 2.1"
+}

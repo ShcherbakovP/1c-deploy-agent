@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Список объектов для ConfigurationRepositoryLock / Commit / Unlock (deploy.ps1 test, commit, unlock).
+     Атрибут includeChildObjects обязателен. Корень <Configuration/> нужен, когда в поставке
+     есть НОВЫЙ объект метаданных (меняется состав конфигурации); для правки существующих
+     модулей и форм его можно опустить. -->
+<Objects xmlns="http://v8.1c.ru/8.3/config/objects" version="1.0">
+  <Object fullName="CommonModule.МойМодуль" includeChildObjects="true"/>
+  <Object fullName="Document.МойДокумент" includeChildObjects="true"/>
+  <Object fullName="Catalog.Договоры.Form.ФормаЭлемента" includeChildObjects="true"/>
+  <Configuration includeChildObjects="false"/>
+</Objects>

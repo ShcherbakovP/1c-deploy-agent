@@ -1,0 +1,15 @@
+{
+  "id": "20260907-183347-ping",
+  "status": "ok",
+  "finished": "2026-09-07 20:33:52",
+  "agent": "2.0",
+  "role": "test",
+  "host": "TEST-1C",
+  "pid": 11432,
+  "user": "CORP\\deploy.user",
+  "server1c": "test-1c",
+  "ib": "erp_test",
+  "platform": "8.3.24.1808",
+  "platformConfigured": "8.3.24.1808",
+  "platformsInstalled": [ "8.3.12.1924", "8.3.22.2283", "8.3.24.1808", "8.3.27.1859" ]
+}

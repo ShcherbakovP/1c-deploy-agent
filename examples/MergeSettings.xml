@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Настройки объединения для /MergeCfg (deploy.ps1 test -Method mergecfg).
+     Корень Settings требует version="1.0", иначе платформа отвечает «ожидаемые version».
+     Имена конфигураций совпадают, потому что release.cf собран из снимка того же хранилища:
+     объединение идёт с приоритетом файла, но только по объектам из -Objects. -->
+<Settings xmlns="http://v8.1c.ru/8.3/config/merge/settings" version="1.0">
+	<MainConfiguration><Name>МояКонфигурация</Name></MainConfiguration>
+	<SecondConfiguration><Name>МояКонфигурация</Name></SecondConfiguration>
+	<Parameters>
+		<ConfigurationsRelation>ConfigurationsNotRelated</ConfigurationsRelation>
+		<AllowMainConfigurationObjectDeletion>false</AllowMainConfigurationObjectDeletion>
+		<CopyObjectsMode>false</CopyObjectsMode>
+	</Parameters>
+</Settings>

@@ -244,6 +244,7 @@ function Stop-IbSessions([string]$IbName = '') {
         $left = @(Get-RacSessions $ctx).Count
         $result.killed = $killed
         $result.left = $left
+        if ($left -gt 0) { $result.detail += ('осталось сеансов: ' + $left) }
         $result.ok = ($errors -eq 0 -and $left -eq 0)
         return $result
     } finally {
@@ -628,14 +629,14 @@ function Do-McpStart($cmd) {
     if ([string]::IsNullOrEmpty($epfName)) { return @{ status = 'error'; error = 'не задано имя обработки: параметр epf или mcpEpf в конфиге роли' } }
 
     # .epf открывает СЕРВЕР 1С (rphost), а не этот скрипт: проброшенный \\tsclient серверу не виден.
-    # Кластер локальный — держим копию на диске этой машины и обновляем из папки обмена по дате.
+    # Кластер локальный — держим копию на диске этой машины (mcpLocalDir) и обновляем из папки обмена по дате.
     # Кластер на другой машине — путь задаётся явно (epfServer / mcpEpfServer) и должен быть виден
     # именно rphost; проверить его отсюда нельзя, обновление файла — на человеке.
     $serverEpf = Coalesce ('' + $cmd.epfServer) ('' + $cfg.mcpEpfServer)
     if ([string]::IsNullOrEmpty($serverEpf)) {
         $shareEpf = Join-Path $ShareRoot $epfName
         if (-not (Test-Path $shareEpf)) { return @{ status = 'error'; error = ('нет обработки: ' + $shareEpf) } }
-        $localDir = 'C:\ProgramData\deploy-agent\mcp'
+        $localDir = Coalesce ('' + $cfg.mcpLocalDir) 'C:\ProgramData\deploy-agent\mcp'
         $serverEpf = Join-Path $localDir $epfName
         try {
             New-Item -ItemType Directory -Force -Path $localDir | Out-Null
