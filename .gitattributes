@@ -1,0 +1,10 @@
+# Скрипты для Windows: CRLF на диске, чтобы cmd и cscript не спотыкались
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+*.vbs  text eol=crlf
+*.md   text eol=lf
+*.py   text eol=lf
+*.json text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+LICENSE        text eol=lf

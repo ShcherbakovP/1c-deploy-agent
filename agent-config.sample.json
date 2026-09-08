@@ -1,0 +1,48 @@
+{
+  "_comment": "Образец. Рабочую копию с учётными данными положите в корень папки обмена как agent-config.json (в git не попадает). Имя секции = роль агента = -Target оркестратора.",
+  "test": {
+    "hostPattern": "^SRV-TEST",
+    "server1c": "srv-test",
+    "ib": "erp_test",
+    "ibUser": "<логин ИБ>",
+    "ibPassword": "<пароль ИБ>",
+    "repoPath": "\\\\fileserver\\1c\\repo",
+    "repoUser": "<пользователь хранилища>",
+    "repoPassword": "<пароль хранилища>",
+    "platformVersion": "8.3.24.1808",
+    "rasPort": 2545,
+    "clusterAddr": "srv-test:1540",
+    "mcpExchange": "\\\\tsclient\\F\\mcp-test",
+    "mcpEpf": "MCPAgent.epf"
+  },
+  "prod": {
+    "hostPattern": "^SRV-1C",
+    "server1c": "srv-1c",
+    "ib": "erp",
+    "ibUser": "<логин ИБ>",
+    "ibPassword": "<пароль ИБ>",
+    "repoPath": "S:\\1c\\repo",
+    "repoUser": "<пользователь хранилища>",
+    "repoPassword": "<пароль хранилища>",
+    "platformVersion": "8.3.22.2283",
+    "rasPort": 2545,
+    "clusterAddr": "srv-1c:1540",
+    "mcpExchange": "\\\\tsclient\\F\\mcp-prod",
+    "mcpEpf": "MCPAgent.epf"
+  },
+  "acc": {
+    "_note": "База без хранилища конфигурации (доработки расширениями). Кластер живёт на другой машине, чем агент: ras/rac ходят по clusterAddr, а .epf для MCP должен лежать по пути, видимому rphost кластера (mcpEpfServer). При обновлении .epf меняйте имя файла — rphost кэширует обработку по пути.",
+    "hostPattern": "^SRV-ACC",
+    "server1c": "server-1c",
+    "ib": "accounting",
+    "ibUser": "<логин ИБ>",
+    "ibPassword": "<пароль ИБ>",
+    "platformVersion": "auto",
+    "rasPort": 2545,
+    "clusterAddr": "server-1c:1540",
+    "mcpExchange": "\\\\tsclient\\F\\mcp-acc",
+    "mcpEpf": "MCPAgent-v3.epf",
+    "mcpEpfServer": "D:\\mcp\\MCPAgent-v3.epf",
+    "dumpDir": "D:\\dump"
+  }
+}
