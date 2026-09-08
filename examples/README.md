@@ -13,6 +13,7 @@
 | `response-test.json` | Ответ на `test`: захват, локальная копия сборки, `MergeCfg`, `UpdateDBCfg` |
 | `response-commit.json` | Ответ на `commit`: помещение и снятие остаточных захватов |
 | `response-update-prod-hot.json` | Ответ на `update-prod -Mode hot`: бэкап, обновление, динамика применилась |
+| `response-update-prod-hot-stop.json` | Ответ на `update-prod -Mode hot`, когда динамика не применилась: платформа вернула ошибку исключительной блокировки со списком сеансов, агент остановился (`hotDynamicFailed`) |
 | `response-update-prod-error.json` | Ответ на `update-prod -Mode full`, когда сеансы снять не удалось: обновление не начато |
 | `com-exec-check-com.vbs` | Скрипт для `com-exec`: диагностика COM-компоненты 1С на сервере |
 | `mcp-args-execute_query.json` | Аргументы для `mcpq.py execute_query` |
