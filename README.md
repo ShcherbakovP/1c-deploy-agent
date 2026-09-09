@@ -1,4 +1,4 @@
-# 1c-deploy-agent
+﻿# 1c-deploy-agent
 
 [<img src="docs/infostart-logo.svg" alt="Infostart" height="28">](https://infostart.ru/1c/articles/2784168/)
 
@@ -85,7 +85,7 @@
 |---|---|
 | `hostPattern` | Регулярное выражение по имени машины для автоопределения роли (иначе `-Role`) |
 | `server1c`, `ib`, `ibUser`, `ibPassword` | ИБ и пользователь для пакетного Конфигуратора |
-| `repoPath`, `repoUser`, `repoPassword` | Хранилище конфигурации. Пусто, если хранилища нет: команды `pull`/`test`/`commit`/`unlock`/`update-prod`/`repo-unbind` отключаются |
+| `repoPath`, `repoUser`, `repoPassword` | Хранилище конфигурации. Пусто, если хранилища нет: команды `pull`/`test`/`commit`/`unlock`/`update-prod`/`repo-bind`/`repo-unbind` отключаются |
 | `platformVersion` | Версия платформы (`8.3.24.1808`) или `auto` |
 | `rasPort`, `clusterAddr` | Локальный `ras` поднимается на `rasPort` и смотрит на `clusterAddr` (кластер может быть на другой машине) |
 | `mcpExchange`, `mcpEpf`, `mcpEpfServer` | MCP-транспорт: папка обмена глазами сервера, имя обработки, путь к ней глазами `rphost` (только если кластер не на машине агента) |
@@ -131,7 +131,8 @@
 | `commit -Comment "…"` | `ConfigurationRepositoryCommit` по `objects.xml`, затем `Unlock` остаточных. **Помещает версию** | 3600 с |
 | `unlock` | `ConfigurationRepositoryUnlock -force` по `objects.xml` без помещения (откат) | 900 с |
 | `update-prod -Mode hot\|full` | Только роль `prod`. Бэкап `DumpCfg` в `artifacts\prod-backup-*.cf`, затем `hot` (`UpdateDBCfg -Dynamic+`, стоп, если динамически не применилось) или `full` (снять сеансы, обновить монопольно) | 5400 с |
-| `repo-unbind` | `ConfigurationRepositoryUnbindCfg -force`: снять связь с хранилищем, чтобы следующий `pull` привязал базу под пользователем из конфига | 900 с |
+| `repo-bind` | `ConfigurationRepositoryBindCfg -forceBindAlreadyBindedUser` под учётной записью из конфига; с `-Force` добавляет `-forceReplaceCfg` и `UpdateDBCfg`. Заменяет ручное подключение базы к хранилищу в Конфигураторе. Вручную нужна редко: `pull`, `test`, `commit`, `unlock` и `update-prod` чинят связь сами | 1800 с |
+| `repo-unbind` | `ConfigurationRepositoryUnbindCfg -force`: снять связь с хранилищем, чтобы следующий `pull` привязал базу под пользователем из конфига | 1800 с |
 | `load-cf -Ib -IbUser -IbPassword [-Cf]` | Полная замена конфигурации произвольной ИБ кластера файлом из `artifacts` | 5400 с |
 
 База без хранилища (расширения, выгрузки):
@@ -279,8 +280,14 @@ MCP-транспорт (см. ниже):
   реструктуризации. Агент это распознаёт по тексту платформы (русская локаль, шаблоны
   в начале `Do-UpdateProd`) и не переключается на `full` сам: решение за человеком.
 - Связь базы с хранилищем рвётся при перезаливке базы из `.dt` («Пользователь существующей
-  связи отличается от текущего»); пакетно сменить пользователя связи нельзя, только
-  `repo-unbind` и заново `pull`.
+  связи отличается от текущего»). С версии 2.1 агент лечит это сам: разбирает текст ошибки
+  платформы, выполняет `ConfigurationRepositoryBindCfg -forceBindAlreadyBindedUser` под
+  учётной записью из конфига и один раз повторяет упавший шаг. Работает в `pull`, `test`,
+  `commit`, `unlock` и `update-prod`; замена конфигурации базы хранилищной
+  (`-forceReplaceCfg`) включается только внутри `pull` и только вне роли `prod`. Отдельно
+  связь ставится командой `repo-bind`. Отказ «Пользователь уже аутентифицирован в хранилище»
+  это не лечит: там залипла сессия учётной записи в файловом хранилище, нужен другой
+  пользователь или ожидание.
 - Внешняя обработка, собранная старшей платформой рабочей станции, на младшей платформе
   сервера молча не открывается («Неизвестная версия формата»). Для сервера собирайте
   его платформой: `build-epf`.

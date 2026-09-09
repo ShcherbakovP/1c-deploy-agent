@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$AgentVersion = '2.0'
+$AgentVersion = '2.1'
 
 # Ранний выход (роль, папка обмена, конфиг, платформа) в окне не увидеть: при запуске из
 # лаунчера окно закрывается вместе с процессом. Причина ложится в файл — локально
@@ -238,7 +238,9 @@ function Stop-IbSessions([string]$IbName = '') {
         foreach ($b in (Get-RacSessions $ctx)) {
             Log ("  снимаю сеанс {0}: {1} / {2}" -f $b['session-id'], $b['user-name'], $b['app-id'])
             $termOut = (& $ctx.rac session terminate ('--cluster=' + $ctx.clusterId) ('--session=' + $b['session']) $ctx.rasAddr 2>&1 | Out-String)
-            if ($termOut.Trim() -eq '') { $killed++ } else { $errors++; $result.detail += ('terminate: ' + $termOut.Trim() + '; ') }
+            # «Сеанс не найден» — не ошибка, а гонка: сеанс закрылся между list и terminate.
+            if ($termOut.Trim() -eq '' -or $termOut -match 'не найден|not found') { $killed++ }
+            else { $errors++; $result.detail += ('terminate: ' + $termOut.Trim() + '; ') }
         }
         Start-Sleep -Seconds 2
         $left = @(Get-RacSessions $ctx).Count
@@ -264,13 +266,71 @@ function Invoke-KillStep($steps, [string]$IbName = '') {
 # --- Пакетный Конфигуратор ------------------------------------------------------
 # Один запуск 1cv8 DESIGNER с ожиданием и таймаутом. $connection — строка подключения:
 # серверная ИБ '/S сервер\ИБ /N пользователь /P "пароль"' или файловая '/F "путь"'.
+# Счётчик ожидания внешнего процесса: раз в 10 с переписывает одну строку в окне агента,
+# чтобы длинный шаг не выглядел зависанием. В файл лога ничего не пишет.
+function Show-Ticker($proc, [string]$step, $sw, [int]$timeoutSec) {
+    $shown = $false
+    while (-not $proc.HasExited) {
+        if ($sw.Elapsed.TotalSeconds -ge $timeoutSec) { break }
+        Start-Sleep -Milliseconds 500
+        if ($sw.Elapsed.TotalSeconds -ge 10) {
+            Write-Host ("`r    {0}: идёт, {1} с (предел {2} с)   " -f $step, [int]$sw.Elapsed.TotalSeconds, $timeoutSec) -NoNewline
+            $shown = $true
+        }
+    }
+    if ($shown) { Write-Host '' }
+}
+
+# Копирование крупного файла с процентом в окне агента: Copy-Item прогресса не даёт, а .cf
+# идут по каналу RDP минутами. В файл лога попадают только начало, четверти и итог.
+function Copy-WithProgress([string]$src, [string]$dst, [string]$label) {
+    $total = (Get-Item -LiteralPath $src).Length
+    $totalMB = [math]::Round($total / 1MB, 1)
+    Log ("{0}: копирую {1} МБ ..." -f $label, $totalMB)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $bufSize = 4 * 1024 * 1024
+    $buffer = New-Object byte[] $bufSize
+    $in = [System.IO.File]::OpenRead($src)
+    $out = [System.IO.File]::Create($dst)
+    try {
+        $copied = 0
+        $loggedPct = 0
+        $tick = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($true) {
+            $read = $in.Read($buffer, 0, $bufSize)
+            if ($read -le 0) { break }
+            $out.Write($buffer, 0, $read)
+            $copied += $read
+            $pct = [int](100 * $copied / $total)
+            if ($tick.Elapsed.TotalSeconds -ge 1) {
+                Write-Host ("`r    {0}: {1}% ({2} из {3} МБ, {4} с)   " -f $label, $pct,
+                    [math]::Round($copied / 1MB, 1), $totalMB, [int]$sw.Elapsed.TotalSeconds) -NoNewline
+                $tick.Restart()
+            }
+            if ($pct -ge $loggedPct + 25 -and $pct -lt 100) {
+                $loggedPct = $pct
+                Log ("{0}: {1}%" -f $label, $pct)
+            }
+        }
+    }
+    finally {
+        $in.Close()
+        $out.Close()
+        Write-Host ''
+    }
+    Log ("{0}: скопировано {1} МБ за {2} с" -f $label, $totalMB, [int]$sw.Elapsed.TotalSeconds)
+}
+
 function Invoke-Designer1cv8([string]$step, [string]$connection, [string]$commandPart, [int]$timeoutSec) {
     $outFile = Join-Path $workRoot ($step + '-' + (Get-Date -Format 'HHmmss') + '.out.txt')
     $argLine = 'DESIGNER ' + $connection + ' ' + $commandPart + ' /Out "' + $outFile + '" /DisableStartupDialogs /DisableStartupMessages'
     Log ("{0}: 1cv8 {1}" -f $step, $commandPart)
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $p = Start-Process -FilePath $designerExe -ArgumentList $argLine -PassThru -WindowStyle Hidden
-    if (-not $p.WaitForExit($timeoutSec * 1000)) {
+    # Пакетный Конфигуратор в консоль ничего не пишет: без счётчика длинные шаги (MergeCfg,
+    # UpdateDBCfg, DumpCfg) выглядят зависанием.
+    Show-Ticker $p $step $sw $timeoutSec
+    if (-not $p.HasExited) {
         try { $p.Kill() } catch {}
         Log ("{0}: ТАЙМАУТ {1} с, процесс снят." -f $step, $timeoutSec)
         return [pscustomobject]@{ Step = $step; ExitCode = -1; Seconds = [int]$sw.Elapsed.TotalSeconds; Output = ('(таймаут ' + $timeoutSec + ' с)') }
@@ -777,7 +837,7 @@ function Do-ExtInstall($cmd) {
 
     # Через RDP-канал платформа читает файл мучительно долго — копия на локальный диск.
     $localCfe = Join-Path $workRoot ('install-' + (Get-Date -Format 'HHmmss') + '.cfe')
-    try { Copy-Item -LiteralPath $src -Destination $localCfe -Force -ErrorAction Stop }
+    try { Copy-WithProgress $src $localCfe 'copy-cfe-local' }
     catch { return @{ status = 'error'; error = ('не скопировал .cfe локально: ' + $_.Exception.Message); steps = $steps } }
     [void]$steps.Add(@{ step = 'copy-local'; from = $src; to = $localCfe; sizeKB = [math]::Round((Get-Item $localCfe).Length / 1KB, 1) })
 
@@ -820,7 +880,7 @@ function Do-DumpCf($cmd) {
 # недокопированный файл. Локальный оригинал удаляется.
 function Publish-Artifact([string]$localPath, [string]$name) {
     $tmp = Join-Path $artDir ($name + '.tmp')
-    Copy-Item -Path $localPath -Destination $tmp -Force
+    Copy-WithProgress $localPath $tmp 'в папку обмена'
     Rename-Item -Path $tmp -NewName $name
     Remove-Item -Path $localPath -Force -ErrorAction SilentlyContinue
 }
@@ -875,7 +935,7 @@ function Do-LoadCf($cmd) {
 
     $localCf = Join-Path $workRoot ('load-' + (Get-Date -Format 'HHmmss') + '.cf')
     $swCopy = [System.Diagnostics.Stopwatch]::StartNew()
-    Copy-Item $src $localCf -Force
+    Copy-WithProgress $src $localCf 'copy-cf-local'
     $swCopy.Stop()
     [void]$steps.Add(@{ step = 'copy-cf-local'; seconds = [int]$swCopy.Elapsed.TotalSeconds })
 
@@ -894,6 +954,65 @@ function Do-LoadCf($cmd) {
 # --- Хранилище конфигурации -----------------------------------------------------
 function Test-RepoConfigured() {
     return -not [string]::IsNullOrEmpty('' + $cfg.repoPath)
+}
+
+# Признаки того, что ИБ потеряла связь с хранилищем (а не что объект занят коллегой).
+# По ним pull/test/commit/unlock решают, чинить ли связь и повторять шаг.
+function Test-RepoLinkBroken([string]$log) {
+    if ([string]::IsNullOrEmpty($log)) { return $false }
+    $signs = @(
+        'не связана с хранилищем',
+        'Пользователь существующей связи отличается',
+        'Ошибка связывания с хранилищем',
+        'Соединение с хранилищем конфигурации не установлено'
+    )
+    foreach ($sign in $signs) { if ($log -match [regex]::Escape($sign)) { return $true } }
+    # Пустой отказ захвата на отвязанной базе: «Ошибка захвата объектов в хранилище» без имени
+    # держателя. Занятый коллегой объект платформа называет поимённо.
+    if ($log -match 'Ошибка (захвата|отмены захвата|помещения) объектов' -and $log -notmatch 'захвачен|занят|другим пользователем') {
+        return $true
+    }
+    return $false
+}
+
+# Установка связи ИБ с хранилищем под учётной записью из конфига. Заменяет ручное подключение
+# базы к хранилищу в Конфигураторе: ключ -forceBindAlreadyBindedUser снимает вопрос о
+# существующей связи того же пользователя. $replaceCfg (-forceReplaceCfg) заменяет конфигурацию
+# базы хранилищной — допустимо там, где база и так приводится к хранилищу (pull).
+function Invoke-RepoBind([bool]$replaceCfg) {
+    $part = '/ConfigurationRepositoryBindCfg -forceBindAlreadyBindedUser'
+    if ($replaceCfg) { $part += ' -forceReplaceCfg' }
+    return (Invoke-Designer 'RepoBind' $part 1800 $true)
+}
+
+# Единая точка починки связи: вызывается из pull/test/commit/unlock/update-prod по признакам
+# Test-RepoLinkBroken. Возвращает $true, если связь установлена и шаг можно повторить.
+function Repair-RepoLink($steps, [bool]$allowReplace) {
+    Log 'связь с хранилищем потеряна — восстанавливаю BindCfg'
+    $b = Invoke-RepoBind $allowReplace
+    Add-DesignerStep $steps $b
+    if ($b.ExitCode -ne 0) { return $false }
+    if ($allowReplace) {
+        # После -forceReplaceCfg конфигурация базы заменена хранилищной, её нужно применить.
+        $u = Invoke-Designer 'UpdateDBCfg-afterBind' '/UpdateDBCfg' 1800 $false
+        Add-DesignerStep $steps $u
+        if ($u.ExitCode -ne 0) { return $false }
+    }
+    return $true
+}
+
+function Do-RepoBind($cmd) {
+    # Явная установка связи ИБ с хранилищем (то же, что делает автопочинка внутри pull и test).
+    # force = true → -forceReplaceCfg: конфигурация базы заменяется хранилищной.
+    $steps = New-Object System.Collections.ArrayList
+    $force = ('' + $cmd.force) -match '^(True|true)$'
+    $fail = Invoke-KillStep $steps; if ($fail) { return $fail }
+    if (Repair-RepoLink $steps $force) {
+        $note = 'связь с хранилищем установлена под ' + $cfg.repoUser
+        if ($force) { $note += ' (конфигурация базы заменена хранилищной)' }
+        return @{ status = 'ok'; note = $note; steps = $steps }
+    }
+    return @{ status = 'error'; error = 'BindCfg не прошёл. Если конфигурация базы разошлась с хранилищем — повторить с force=true; если «Пользователь уже аутентифицирован» — сессия учётной записи залипла в хранилище, нужен другой пользователь.'; steps = $steps }
 }
 
 function Do-RepoUnbind($cmd) {
@@ -916,6 +1035,15 @@ function Do-Pull() {
 
     $r = Invoke-Designer 'RepoUpdateCfg' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
     Add-DesignerStep $steps $r
+    if ($r.ExitCode -ne 0 -and (Test-RepoLinkBroken $r.Output)) {
+        # Связь ИБ с хранилищем потеряна (перезалитая база, чужая учётная запись связи, отвязка).
+        # Восстанавливаем и повторяем шаг: замена конфигурации хранилищной здесь безопасна —
+        # pull и так приводит базу к хранилищу. На боевой роли замену не включаем.
+        if (Repair-RepoLink $steps ($Role -ne 'prod')) {
+            $r = Invoke-Designer 'RepoUpdateCfg-retry' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
+            Add-DesignerStep $steps $r
+        }
+    }
     if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = ('ConfigurationRepositoryUpdateCfg: exit=' + $r.ExitCode); steps = $steps } }
 
     $r = Invoke-Designer 'UpdateDBCfg' '/UpdateDBCfg' 1800 $false
@@ -949,6 +1077,14 @@ function Do-Test($cmd) {
 
     $r = Invoke-Designer 'Lock' ('/ConfigurationRepositoryLock -objects "' + $objects + '"') 900 $true
     Add-DesignerStep $steps $r
+    if ($r.ExitCode -ne 0 -and (Test-RepoLinkBroken $r.Output)) {
+        # Захват на отвязанной базе падает пустым «Ошибка захвата объектов» и выглядит как чужой
+        # замок. Восстанавливаем связь без замены конфигурации и повторяем захват один раз.
+        if (Repair-RepoLink $steps $false) {
+            $r = Invoke-Designer 'Lock-retry' ('/ConfigurationRepositoryLock -objects "' + $objects + '"') 900 $true
+            Add-DesignerStep $steps $r
+        }
+    }
     if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = 'ЗАХВАТ НЕ УДАЛСЯ — объект занят или база не на последней версии. Тестовая не тронута.'; alarm = $true; steps = $steps } }
 
     # Три способа наложить release.cf:
@@ -992,7 +1128,7 @@ function Do-Test($cmd) {
         # объединение в полчаса. Локальная копия — и объединение снова идёт за секунды.
         $localRel = Join-Path $workRoot ('merge-' + (Get-Date -Format 'HHmmss') + '.cf')
         $swCopy = [System.Diagnostics.Stopwatch]::StartNew()
-        Copy-Item $release $localRel -Force
+        Copy-WithProgress $release $localRel 'copy-release-local'
         $swCopy.Stop()
         [void]$steps.Add(@{ step = 'copy-release-local'; seconds = [int]$swCopy.Elapsed.TotalSeconds })
         $r = Invoke-Designer 'MergeCfg' ('/MergeCfg "' + $localRel + '" -Settings "' + $settings + '" -Objects "' + $objects + '"') 3600 $false
@@ -1016,6 +1152,14 @@ function Do-Commit($cmd) {
 
     $r = Invoke-Designer 'Commit' ('/ConfigurationRepositoryCommit -objects "' + $objects + '" -comment "' + $comment + '"') 1800 $true
     Add-DesignerStep $steps $r
+    if ($r.ExitCode -ne 0 -and (Test-RepoLinkBroken $r.Output)) {
+        # Связь потеряна между test и commit. Восстанавливаем БЕЗ замены конфигурации: в базе
+        # лежит проверенная приёмкой версия, её и надо поместить.
+        if (Repair-RepoLink $steps $false) {
+            $r = Invoke-Designer 'Commit-retry' ('/ConfigurationRepositoryCommit -objects "' + $objects + '" -comment "' + $comment + '"') 1800 $true
+            Add-DesignerStep $steps $r
+        }
+    }
     if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = ('Commit: exit=' + $r.ExitCode + '. Объекты остались захвачены.'); alarm = $true; steps = $steps } }
 
     # Остаточные захваты: объекты из списка, которые по факту не изменились, Commit не отпускает.
@@ -1030,6 +1174,12 @@ function Do-Unlock($cmd) {
     if (-not (Test-Path $objects)) { return @{ status = 'error'; error = ('нет файла objects: ' + $objects) } }
     $r = Invoke-Designer 'Unlock' ('/ConfigurationRepositoryUnlock -objects "' + $objects + '" -force') 900 $true
     Add-DesignerStep $steps $r
+    if ($r.ExitCode -ne 0 -and (Test-RepoLinkBroken $r.Output)) {
+        if (Repair-RepoLink $steps $false) {
+            $r = Invoke-Designer 'Unlock-retry' ('/ConfigurationRepositoryUnlock -objects "' + $objects + '" -force') 900 $true
+            Add-DesignerStep $steps $r
+        }
+    }
     if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = ('Unlock: exit=' + $r.ExitCode + '. Захват НЕ снят — проверьте вручную в Конфигураторе.'); alarm = $true; steps = $steps } }
     return @{ status = 'ok'; note = 'Захват снят, версия в хранилище НЕ создана (откат).'; steps = $steps }
 }
@@ -1061,6 +1211,14 @@ function Do-UpdateProd($cmd) {
 
         $r = Invoke-Designer 'RepoUpdateCfg' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
         Add-DesignerStep $steps $r
+        if ($r.ExitCode -ne 0 -and (Test-RepoLinkBroken $r.Output)) {
+            # На боевой связь восстанавливаем БЕЗ -forceReplaceCfg: подменять конфигурацию
+            # автоматически нельзя, только установить связь и повторить штатное обновление.
+            if (Repair-RepoLink $steps $false) {
+                $r = Invoke-Designer 'RepoUpdateCfg-retry' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
+                Add-DesignerStep $steps $r
+            }
+        }
         if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = ('ConfigurationRepositoryUpdateCfg: exit=' + $r.ExitCode); alarm = $true; backup = $backupName; steps = $steps } }
 
         $r = Invoke-Designer 'UpdateDBCfg' '/UpdateDBCfg' 1800 $false
@@ -1071,6 +1229,12 @@ function Do-UpdateProd($cmd) {
 
     $r = Invoke-Designer 'RepoUpdateCfg' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
     Add-DesignerStep $steps $r
+    if ($r.ExitCode -ne 0 -and (Test-RepoLinkBroken $r.Output)) {
+        if (Repair-RepoLink $steps $false) {
+            $r = Invoke-Designer 'RepoUpdateCfg-retry' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
+            Add-DesignerStep $steps $r
+        }
+    }
     if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = ('ConfigurationRepositoryUpdateCfg (hot): exit=' + $r.ExitCode + '. Конфигурация не подтянута, БД не тронута.'); alarm = $true; backup = $backupName; steps = $steps } }
 
     $r = Invoke-Designer 'UpdateDBCfgDynamic' '/UpdateDBCfg -Dynamic+' 1800 $false
@@ -1088,7 +1252,7 @@ function Do-UpdateProd($cmd) {
 }
 
 # --- Основной цикл --------------------------------------------------------------
-$repoCommands = @('pull', 'repo-unbind', 'test', 'commit', 'unlock', 'update-prod')
+$repoCommands = @('pull', 'repo-bind', 'repo-unbind', 'test', 'commit', 'unlock', 'update-prod')
 
 function Invoke-Command1($cmd) {
     if (($repoCommands -contains $cmd.command) -and -not (Test-RepoConfigured)) {
@@ -1114,6 +1278,7 @@ function Invoke-Command1($cmd) {
         'dump-cf'       { return Do-DumpCf $cmd }
         'dump-dt'       { return Do-DumpDt $cmd }
         'load-cf'       { return Do-LoadCf $cmd }
+        'repo-bind'     { return Do-RepoBind $cmd }
         'repo-unbind'   { return Do-RepoUnbind $cmd }
         'pull'          { return Do-Pull }
         'test'          { return Do-Test $cmd }

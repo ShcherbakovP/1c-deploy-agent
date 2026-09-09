@@ -23,7 +23,7 @@ param(
     [ValidateSet('ping', 'status', 'sessions', 'kill-sessions', 'com-check', 'peek', 'fetch', 'com-exec', 'windows',
         'screenshot', 'build-epf', 'mcp-start', 'mcp-stop', 'mcp-list',
         'ext-list', 'ext-dump', 'ext-install', 'dump-cf', 'dump-dt', 'load-cf',
-        'pull', 'repo-unbind', 'test', 'commit', 'unlock', 'update-prod', 'reload', 'stop')]
+        'pull', 'repo-bind', 'repo-unbind', 'test', 'commit', 'unlock', 'update-prod', 'reload', 'stop')]
     [string]$Command,
     [string]$Target = 'test',
     [string]$Root = '',
@@ -69,7 +69,7 @@ if ($Command -eq 'update-prod') { $Target = 'prod' }
 
 # Команды хранилища для цели без repoPath отклоняем сразу, не гоняя агента.
 $configPath = Join-Path $Root 'agent-config.json'
-if ($Command -in @('pull', 'repo-unbind', 'test', 'commit', 'unlock', 'update-prod') -and (Test-Path $configPath)) {
+if ($Command -in @('pull', 'repo-bind', 'repo-unbind', 'test', 'commit', 'unlock', 'update-prod') -and (Test-Path $configPath)) {
     try {
         $section = (Get-Content -Path $configPath -Raw -Encoding UTF8 | ConvertFrom-Json).$Target
         if ($null -ne $section -and [string]::IsNullOrEmpty('' + $section.repoPath)) {
@@ -92,7 +92,8 @@ if ($TimeoutSec -eq 0) {
     elseif ($Command -in @('pull', 'update-prod', 'load-cf', 'fetch', 'dump-cf')) { $TimeoutSec = 5400 }
     elseif ($Command -in @('test', 'commit', 'ext-install')) { $TimeoutSec = 3600 }
     elseif ($Command -eq 'ext-list') { $TimeoutSec = 1800 }
-    elseif ($Command -in @('ext-dump', 'unlock', 'repo-unbind', 'build-epf')) { $TimeoutSec = 900 }
+    elseif ($Command -in @('repo-bind', 'repo-unbind')) { $TimeoutSec = 1800 }
+    elseif ($Command -in @('ext-dump', 'unlock', 'build-epf')) { $TimeoutSec = 900 }
     elseif ($Command -eq 'mcp-start') { $TimeoutSec = 300 }
     elseif ($Command -in @('com-check', 'com-exec')) { $TimeoutSec = 180 }
     else { $TimeoutSec = 90 }
@@ -148,6 +149,13 @@ if ($Command -in @('test', 'commit', 'unlock')) {
     if ($Comment -ne '') { $payload.comment = $Comment }
     Write-Host ("Артефакты: objects={0}" -f $Objects)
     Write-Host ("ВНИМАНИЕ: команда '{0}' изменяет ОБЩЕЕ хранилище конфигурации." -f $Command)
+}
+
+if ($Command -eq 'repo-bind') {
+    # -Force → -forceReplaceCfg: конфигурация базы заменяется хранилищной. Нужен, когда база
+    # разошлась с хранилищем (перезалита, обновлена из .cf); на боевой применять осознанно.
+    $payload.force = [bool]$Force
+    if ($Force) { Write-Host 'ВНИМАНИЕ: конфигурация базы будет заменена хранилищной (-Force).' }
 }
 
 if ($Command -eq 'load-cf') {
