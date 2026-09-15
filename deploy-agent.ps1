@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$AgentVersion = '2.1'
+$AgentVersion = '2.2'
 
 # Ранний выход (роль, папка обмена, конфиг, платформа) в окне не увидеть: при запуске из
 # лаунчера окно закрывается вместе с процессом. Причина ложится в файл — локально
@@ -1027,6 +1027,49 @@ function Do-RepoUnbind($cmd) {
     return @{ status = 'ok'; note = 'база отвязана от хранилища; следующий pull привяжет её под пользователем из конфига'; steps = $steps }
 }
 
+function Do-RepoReport($cmd) {
+    # История хранилища с версии nbegin: кто, когда и какие объекты помещал. Текст отчёта в ответе
+    # и файлом в artifacts. Базу не меняет, сеансы не снимает (read-only диагностика). Нужна перед
+    # test: если после снимка, от которого собран release.cf, в хранилище есть чужие версии по
+    # захватываемым объектам, объединение затрёт чужую правку (двоичные формы сливаются целиком).
+    # На большом хранилище отчёт может идти долго — отсюда отдельный таймаут команды.
+    $nb = [int]('0' + $cmd.nbegin); if ($nb -le 0) { $nb = 1 }
+    $ne = [int]('0' + $cmd.nend)
+    $name = 'repo-report-' + $nb + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.txt'
+    $local = Join-Path $workRoot $name
+    $part = '/ConfigurationRepositoryReport "' + $local + '" -NBegin ' + $nb
+    if ($ne -gt 0) { $part += ' -NEnd ' + $ne }
+    $part += ' -ReportFormat txt'
+    $r = Invoke-Designer 'RepoReport' $part 900 $true
+    if ($r.ExitCode -ne 0 -or -not (Test-Path $local)) {
+        return @{ status = 'error'; error = ('ConfigurationRepositoryReport: exit=' + $r.ExitCode + ', файл есть=' + (Test-Path $local)); log = (Get-Tail $r.Output) }
+    }
+    Copy-Item -Path $local -Destination (Join-Path $artDir $name) -Force
+    $text = Get-Content -Path $local -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $text) { $text = '' }
+    Remove-Item -Path $local -Force -ErrorAction SilentlyContinue
+    return @{ status = 'ok'; nbegin = $nb; nend = $ne; artifact = ('artifacts/' + $name); report = (Get-Tail $text 200) }
+}
+
+function Do-RepoDump($cmd) {
+    # Конфигурация заданной версии хранилища в .cf (ConfigurationRepositoryDumpCfg -v N). Базу не
+    # меняет, сеансы не снимает. Нужна, чтобы достать объект, затёртый в хранилище, из его прежней
+    # версии: из полученного .cf объект выгружают и собирают правку заново.
+    $ver = [int]('0' + $cmd.version)
+    if ($ver -le 0) { return @{ status = 'error'; error = 'repo-dump: не задана версия хранилища (version)' } }
+    $cfName = 'repo-v' + $ver + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.cf'
+    $localCf = Join-Path $workRoot $cfName
+    $r = Invoke-Designer 'RepoDumpCfg' ('/ConfigurationRepositoryDumpCfg "' + $localCf + '" -v ' + $ver) 3600 $true
+    if ($r.ExitCode -ne 0 -or -not (Test-Path $localCf)) {
+        return @{ status = 'error'; error = ('ConfigurationRepositoryDumpCfg -v ' + $ver + ': exit=' + $r.ExitCode + ', файл есть=' + (Test-Path $localCf)); log = (Get-Tail $r.Output) }
+    }
+    $hash = (Get-FileHash -Path $localCf -Algorithm SHA256).Hash
+    $sizeMB = [math]::Round((Get-Item $localCf).Length / 1MB, 1)
+    Log ("Копирую версию хранилища в папку обмена ({0} МБ)..." -f $sizeMB)
+    Publish-Artifact $localCf $cfName
+    return @{ status = 'ok'; version = $ver; artifact = ('artifacts/' + $cfName); sha256 = $hash; sizeMB = $sizeMB }
+}
+
 function Do-Pull() {
     # Обновление базы из хранилища и снимок конфигурации в artifacts. Версию хранилища
     # фиксирует SHA256 снимка: ключ /ConfigurationRepositoryReport на большом хранилище виснет.
@@ -1252,7 +1295,7 @@ function Do-UpdateProd($cmd) {
 }
 
 # --- Основной цикл --------------------------------------------------------------
-$repoCommands = @('pull', 'repo-bind', 'repo-unbind', 'test', 'commit', 'unlock', 'update-prod')
+$repoCommands = @('pull', 'repo-bind', 'repo-unbind', 'repo-report', 'repo-dump', 'test', 'commit', 'unlock', 'update-prod')
 
 function Invoke-Command1($cmd) {
     if (($repoCommands -contains $cmd.command) -and -not (Test-RepoConfigured)) {
@@ -1280,6 +1323,8 @@ function Invoke-Command1($cmd) {
         'load-cf'       { return Do-LoadCf $cmd }
         'repo-bind'     { return Do-RepoBind $cmd }
         'repo-unbind'   { return Do-RepoUnbind $cmd }
+        'repo-report'   { return Do-RepoReport $cmd }
+        'repo-dump'     { return Do-RepoDump $cmd }
         'pull'          { return Do-Pull }
         'test'          { return Do-Test $cmd }
         'commit'        { return Do-Commit $cmd }

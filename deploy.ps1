@@ -23,7 +23,7 @@ param(
     [ValidateSet('ping', 'status', 'sessions', 'kill-sessions', 'com-check', 'peek', 'fetch', 'com-exec', 'windows',
         'screenshot', 'build-epf', 'mcp-start', 'mcp-stop', 'mcp-list',
         'ext-list', 'ext-dump', 'ext-install', 'dump-cf', 'dump-dt', 'load-cf',
-        'pull', 'repo-bind', 'repo-unbind', 'test', 'commit', 'unlock', 'update-prod', 'reload', 'stop')]
+        'pull', 'repo-bind', 'repo-unbind', 'repo-report', 'repo-dump', 'test', 'commit', 'unlock', 'update-prod', 'reload', 'stop')]
     [string]$Command,
     [string]$Target = 'test',
     [string]$Root = '',
@@ -36,6 +36,10 @@ param(
     [string]$Method = 'mergecfg',
     [ValidateSet('', 'hot', 'full')]
     [string]$Mode = '',
+    # repo-dump: номер версии хранилища; repo-report: диапазон версий истории.
+    [int]$Version = 0,
+    [int]$NBegin = 0,
+    [int]$NEnd = 0,
     [string]$Ib = '',
     [string]$IbUser = '',
     [string]$IbPassword = '',
@@ -93,6 +97,8 @@ if ($TimeoutSec -eq 0) {
     elseif ($Command -in @('test', 'commit', 'ext-install')) { $TimeoutSec = 3600 }
     elseif ($Command -eq 'ext-list') { $TimeoutSec = 1800 }
     elseif ($Command -in @('repo-bind', 'repo-unbind')) { $TimeoutSec = 1800 }
+    elseif ($Command -eq 'repo-dump') { $TimeoutSec = 3600 }
+    elseif ($Command -eq 'repo-report') { $TimeoutSec = 900 }
     elseif ($Command -in @('ext-dump', 'unlock', 'build-epf')) { $TimeoutSec = 900 }
     elseif ($Command -eq 'mcp-start') { $TimeoutSec = 300 }
     elseif ($Command -in @('com-check', 'com-exec')) { $TimeoutSec = 180 }
@@ -251,6 +257,15 @@ if ($Command -in @('mcp-start', 'mcp-stop', 'mcp-list')) {
     if ($Command -eq 'mcp-start' -and $Kill) { Write-Host 'ВНИМАНИЕ: перед запуском будут сняты ВСЕ сеансы базы.' }
 }
 
+if ($Command -eq 'repo-dump') {
+    if ($Version -le 0) { Stop-WithUsage 'Укажите номер версии хранилища: -Version <N>.' }
+    $payload.version = $Version
+}
+if ($Command -eq 'repo-report') {
+    if ($NBegin -gt 0) { $payload.nbegin = $NBegin }
+    if ($NEnd -gt 0) { $payload.nend = $NEnd }
+}
+
 if ($Command -eq 'update-prod') {
     if ($Mode -eq '') { Stop-WithUsage 'Укажите режим: -Mode hot (динамически, без завершения сеансов) | full (с завершением сеансов).' }
     $payload.mode = $Mode
@@ -283,6 +298,8 @@ $reply | ConvertTo-Json -Depth 6 | Write-Host
 if ($reply.status -eq 'ok') {
     if ($Command -eq 'pull') { Log ("Снимок: {0} (SHA256 {1}, {2} МБ)" -f $reply.artifact, $reply.sha256, $reply.sizeMB) }
     if ($Command -eq 'dump-cf') { Log ("Конфигурация: {0} ({1} МБ)." -f $reply.artifact, $reply.sizeMB) }
+    if ($Command -eq 'repo-dump') { Log ("Версия {0} хранилища: {1} (SHA256 {2}, {3} МБ)" -f $reply.version, $reply.artifact, $reply.sha256, $reply.sizeMB) }
+    if ($Command -eq 'repo-report') { Log ("Отчёт истории: {0}" -f $reply.artifact) }
     if ($Command -eq 'dump-dt') { Log ("Выгрузка ИБ: {0} ({1} ГБ) — файл на сервере. Забрать: deploy.ps1 fetch -Target {2} -Path '{0}'" -f $reply.path, $reply.sizeGB, $Target) }
     exit 0
 }
