@@ -273,6 +273,13 @@ if ($Command -eq 'update-prod') {
     Write-Host ("ВНИМАНИЕ: update-prod (режим {0}) обновляет БОЕВУЮ базу из хранилища." -f $Mode)
 }
 
+# --- Агент молчит: не ждать таймаут впустую (ретро 17.11.2026) -------------------
+$hbPath = Join-Path $outDir 'agent-status.json'
+if ($Command -ne 'ping' -and (Test-Path $hbPath)) {
+    $age = [int]((Get-Date) - (Get-Item $hbPath).LastWriteTime).TotalSeconds
+    if ($age -gt 180) { Log ("Heartbeat агента {0} с назад, команду не отправляю: агент не работает." -f $age); exit 2 }
+}
+
 # --- Отправка команды и ожидание ответа ------------------------------------------
 $id = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + $Command
 $payload.id = $id
