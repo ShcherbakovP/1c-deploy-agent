@@ -13,6 +13,7 @@
 #   deploy.ps1 commit -Comment "задача 12345"        # помещение в хранилище
 #   deploy.ps1 unlock                                # откат: снять захват без версии
 #   deploy.ps1 update-prod -Mode hot                 # боевая из хранилища, динамически
+#   deploy.ps1 update-prod -Mode hot -Objects objects-x.xml  # только объекты из списка
 #   deploy.ps1 ext-install -Target acc -Extension МоёРасширение -Cfe C:\build\МоёРасширение.cfe
 #   deploy.ps1 mcp-start -Target prod                # MCP-демон по COM (только чтение)
 #   deploy.ps1 fetch -Path 'D:\dump\base.dt'         # файл с сервера в artifacts
@@ -287,6 +288,14 @@ if ($Command -eq 'update-prod') {
     if ($Mode -eq '') { Stop-WithUsage 'Укажите режим: -Mode hot (динамически, без завершения сеансов) | full (с завершением сеансов).' }
     $payload.mode = $Mode
     if ($Comment -ne '') { $payload.comment = $Comment }
+    # -Objects: забрать из хранилища только эти объекты. Без него берётся всё хранилище
+    # (последний objects-*.xml здесь сознательно НЕ подставляется, в отличие от test).
+    if ($Objects -ne '') {
+        $Objects = Split-Path $Objects -Leaf
+        if (-not (Test-Path (Join-Path $artDir $Objects))) { Stop-WithUsage ("Нет файла {0} в artifacts." -f $Objects) }
+        $payload.objects = $Objects
+        Write-Host ("Из хранилища берутся только объекты из {0}." -f $Objects)
+    }
     Write-Host ("ВНИМАНИЕ: update-prod (режим {0}) обновляет БОЕВУЮ базу из хранилища." -f $Mode)
 }
 
@@ -298,7 +307,7 @@ if ($Command -ne 'ping') {
     switch ($st.State) {
         'busy'      { Log ($st.Text + ' Команда ставится в очередь.') }
         'stale-old' { Log ('ВНИМАНИЕ: ' + $st.Text + ' Команда ставится в очередь.') }
-        'dead'      { Log ($st.Text + ' Команду не отправляю. Поднять агента (rdp-open.ps1 или agent-start), дождаться свежего heartbeat (deploy.ps1 status), затем повторить.'); exit 2 }
+        'dead'      { Log ($st.Text + ' Команду не отправляю. Запустить агента на сервере (RDP-сессию подключает rdp-open.ps1 -ConnectOnly), дождаться свежего heartbeat (deploy.ps1 status) и повторить.'); exit 2 }
     }
 }
 $payload.waitSec = $TimeoutSec

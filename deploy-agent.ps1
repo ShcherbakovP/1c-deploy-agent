@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$AgentVersion = '2.3'
+$AgentVersion = '2.4'
 
 # Ранний выход (роль, папка обмена, конфиг, платформа) в окне не увидеть: при запуске из
 # лаунчера окно закрывается вместе с процессом. Причина ложится в файл — локально
@@ -242,8 +242,20 @@ function Stop-IbSessions([string]$IbName = '') {
             if ($termOut.Trim() -eq '' -or $termOut -match 'не найден|not found') { $killed++ }
             else { $errors++; $result.detail += ('terminate: ' + $termOut.Trim() + '; ') }
         }
-        Start-Sleep -Seconds 2
-        $left = @(Get-RacSessions $ctx).Count
+        # Сеансы после terminate завершаются не мгновенно: один замер через 2 с считал их
+        # оставшимися и срывал полное обновление. Ждём до 60 с, повторяя terminate по тем,
+        # что ещё числятся (новые при запрете сеансов не подключатся).
+        $left = -1
+        for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            $rest = @(Get-RacSessions $ctx)
+            $left = $rest.Count
+            if ($left -eq 0) { break }
+            if ($i % 5 -eq 4) {
+                foreach ($b in $rest) { & $ctx.rac session terminate ('--cluster=' + $ctx.clusterId) ('--session=' + $b['session']) $ctx.rasAddr 2>&1 | Out-Null }
+            }
+        }
+        if ($left -gt 0) { Log ("  осталось сеансов после ожидания 60 с: {0}" -f $left) }
         $result.killed = $killed
         $result.left = $left
         if ($left -gt 0) { $result.detail += ('осталось сеансов: ' + $left) }
@@ -252,6 +264,57 @@ function Stop-IbSessions([string]$IbName = '') {
     } finally {
         if ($ctx.rasProc) { try { $ctx.rasProc.Kill() } catch {} }
     }
+}
+
+# Запрет новых сеансов и регламентных заданий на время монопольных операций. Stop-IbSessions
+# снимает текущие сеансы, но толстые клиенты и роботы переподключаются за секунды и срывают
+# UpdateDBCfg («Ошибка исключительной блокировки»). Поэтому перед снятием сеансов ставим на ИБ
+# запрет с кодом разрешения, а свои запуски Конфигуратора ведём с /UC <код> (обёртки добавляют
+# код сами, пока $script:CurrentUC не пуст). Снимать запрет вызывающий обязан в finally.
+$script:DenyCode  = Coalesce ('' + $cfg.denyCode) 'DEPLOY'
+$script:CurrentUC = ''
+
+function Set-IbSessionsDeny([bool]$On, [string]$IbName = '') {
+    $IbName = Coalesce $IbName ('' + $cfg.ib)
+    $result = @{ ok = $false; on = $On; detail = '' }
+    $ctx = Connect-Rac $IbName
+    try {
+        if (-not $ctx.ok) { $result.detail = $ctx.detail; return $result }
+        $flag = 'off'
+        if ($On) { $flag = 'on' }
+        $racArgs = @('infobase', 'update', ('--cluster=' + $ctx.clusterId), ('--infobase=' + $ctx.ibId),
+            ('--infobase-user=' + $cfg.ibUser), ('--infobase-pwd=' + $cfg.ibPassword),
+            ('--sessions-deny=' + $flag), ('--scheduled-jobs-deny=' + $flag),
+            ('--permission-code=' + $script:DenyCode))
+        if ($On) { $racArgs += '--denied-message=Идёт обновление конфигурации, попробуйте через несколько минут' }
+        $racArgs += $ctx.rasAddr
+        $out = (& $ctx.rac @racArgs 2>&1 | Out-String)
+        $result.ok = ($LASTEXITCODE -eq 0)
+        if ($out.Trim() -ne '') { $result.detail = $out.Trim() }
+        if ($result.ok) {
+            if ($On) { $script:CurrentUC = $script:DenyCode } else { $script:CurrentUC = '' }
+            Log ('запрет новых сеансов ' + $IbName + ': ' + $flag)
+        } else {
+            Log ('запрет новых сеансов ' + $IbName + ' (' + $flag + ') НЕ установлен: ' + $result.detail)
+        }
+        return $result
+    } finally {
+        if ($ctx.rasProc) { try { $ctx.rasProc.Kill() } catch {} }
+    }
+}
+
+# Обёртка монопольной операции: запрет сеансов → $body → снятие запрета в finally, даже при
+# провале или исключении. Оба шага пишутся в $steps. $failExtra дописывается к ошибке запрета.
+function Invoke-WithSessionsDeny($steps, [scriptblock]$body, [hashtable]$failExtra = @{}) {
+    $d = Set-IbSessionsDeny $true
+    [void]$steps.Add(@{ step = 'sessions-deny'; ok = $d.ok; detail = $d.detail })
+    if (-not $d.ok) {
+        $fail = @{ status = 'error'; error = ('запрет новых сеансов не установлен: ' + $d.detail); steps = $steps }
+        foreach ($k in $failExtra.Keys) { $fail[$k] = $failExtra[$k] }
+        return $fail
+    }
+    try { return (& $body) }
+    finally { $d = Set-IbSessionsDeny $false; [void]$steps.Add(@{ step = 'sessions-allow'; ok = $d.ok; detail = $d.detail }) }
 }
 
 # Шаг «снять сеансы» в составе многошаговой команды: пишет шаг в $steps, при неудаче
@@ -351,9 +414,17 @@ function Quote-Password([string]$password) {
     return '"' + (('' + $password) -replace '"', '""') + '"'
 }
 
+# Подключение к ИБ для 1cv8: серверная (/S сервер\база) или файловая (/F каталог), если в
+# конфиге роли server1c пуст, а ib — путь к каталогу базы.
+function Get-IbConnArg([string]$ib) {
+    if ([string]::IsNullOrEmpty('' + $cfg.server1c)) { return ('/F "' + $ib + '"') }
+    return ('/S ' + $cfg.server1c + '\' + $ib)
+}
+
 # ИБ из конфига роли, при $withRepo — с параметрами хранилища конфигурации.
 function Invoke-Designer([string]$step, [string]$commandPart, [int]$timeoutSec, [bool]$withRepo) {
-    $conn = '/S ' + $cfg.server1c + '\' + $cfg.ib + ' /N ' + $cfg.ibUser + ' /P ' + (Quote-Password $cfg.ibPassword)
+    $conn = (Get-IbConnArg $cfg.ib) + ' /N ' + $cfg.ibUser + ' /P ' + (Quote-Password $cfg.ibPassword)
+    if ($script:CurrentUC -ne '') { $conn += ' /UC ' + $script:CurrentUC }
     if ($withRepo) {
         $conn += ' /ConfigurationRepositoryF "' + $cfg.repoPath + '"' +
             ' /ConfigurationRepositoryN "' + $cfg.repoUser + '" /ConfigurationRepositoryP ' + (Quote-Password $cfg.repoPassword)
@@ -363,7 +434,8 @@ function Invoke-Designer([string]$step, [string]$commandPart, [int]$timeoutSec, 
 
 # Произвольная серверная ИБ этого кластера (без хранилища) — для баз, которых нет в конфиге.
 function Invoke-DesignerIb([string]$step, [string]$ib, [string]$user, [string]$password, [string]$commandPart, [int]$timeoutSec) {
-    $conn = '/S ' + $cfg.server1c + '\' + $ib + ' /N ' + $user + ' /P ' + (Quote-Password $password)
+    $conn = (Get-IbConnArg $ib) + ' /N ' + $user + ' /P ' + (Quote-Password $password)
+    if ($script:CurrentUC -ne '' -and $ib -eq $cfg.ib) { $conn += ' /UC ' + $script:CurrentUC }
     return Invoke-Designer1cv8 ($step + '[' + $ib + ']') $conn $commandPart $timeoutSec
 }
 
@@ -407,11 +479,15 @@ function Do-ComCheck($cmd) {
     # comcntr, CLSID/AppID (по ним администратор ищет объект в dcomcnfg), учётка службы сервера 1С,
     # и, если задана ИБ, одно реальное внешнее соединение. Всё, кроме соединения, read-only.
     $result = @{ status = 'error'; host = $env:COMPUTERNAME; target = ('' + $cmd.server1c) }
-    if (-not $cmd.server1c) { $result.error = 'нет параметра server1c'; return $result }
+    # Файловая база (ib — каталог, server1c пуст): кластера нет, TCP-проверку пропускаем.
+    $isFile = (-not $cmd.server1c) -and ('' + $cmd.ib) -match '^[A-Za-z]:\\|^\\\\'
+    if (-not $cmd.server1c -and -not $isFile) { $result.error = 'нет параметра server1c'; return $result }
 
     # 1540 ragent, 1541 rmngr, 1560 — первый порт rphost.
     $tcp = @{}
-    foreach ($port in @(1540, 1541, 1560)) {
+    $ports = @(1540, 1541, 1560)
+    if ($isFile) { $ports = @() }
+    foreach ($port in $ports) {
         $client = New-Object System.Net.Sockets.TcpClient
         try {
             $iar = $client.BeginConnect($cmd.server1c, $port, $null, $null)
@@ -459,6 +535,7 @@ function Do-ComCheck($cmd) {
         $connector = New-Object -ComObject 'V83.COMConnector'
         $pwd = ('' + $cmd.password) -replace '"', '""'
         $connStr = ('Srvr="{0}";Ref="{1}";Usr="{2}";Pwd="{3}";' -f $cmd.server1c, $cmd.ib, $cmd.user, $pwd)
+        if ($isFile) { $connStr = ('File="{0}";Usr="{1}";Pwd="{2}";' -f $cmd.ib, $cmd.user, $pwd) }
         $t0 = Get-Date
         $conn = $connector.Connect($connStr)
         $result.connectSeconds = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
@@ -1074,6 +1151,10 @@ function Do-Pull() {
     # Обновление базы из хранилища и снимок конфигурации в artifacts. Версию хранилища
     # фиксирует SHA256 снимка: ключ /ConfigurationRepositoryReport на большом хранилище виснет.
     $steps = New-Object System.Collections.ArrayList
+    return (Invoke-WithSessionsDeny $steps { Do-PullInner $steps })
+}
+
+function Do-PullInner($steps) {
     $fail = Invoke-KillStep $steps; if ($fail) { return $fail }
 
     $r = Invoke-Designer 'RepoUpdateCfg' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
@@ -1111,10 +1192,15 @@ function Do-Test($cmd) {
     # Захват объектов в хранилище → наложение release.cf → UpdateDBCfg. После успеха объекты
     # остаются захваченными до commit (помещение) или unlock (откат).
     $steps = New-Object System.Collections.ArrayList
+    $objects = Join-Path $artDir $cmd.objects
+    if (-not (Test-Path $objects)) { return @{ status = 'error'; error = ('нет файла objects: ' + $objects) } }
+    return (Invoke-WithSessionsDeny $steps { Do-TestInner $cmd $steps })
+}
+
+function Do-TestInner($cmd, $steps) {
     $objects  = Join-Path $artDir $cmd.objects
     $release  = Join-Path $artDir $cmd.release
     $settings = Join-Path $artDir $cmd.settings
-    if (-not (Test-Path $objects)) { return @{ status = 'error'; error = ('нет файла objects: ' + $objects) } }
 
     $fail = Invoke-KillStep $steps; if ($fail) { return $fail }
 
@@ -1241,6 +1327,18 @@ function Do-UpdateProd($cmd) {
     if ($mode -ne 'hot' -and $mode -ne 'full') { return @{ status = 'error'; error = "режим не указан или неверен (ожидается hot|full): '$mode'" } }
     $steps = New-Object System.Collections.ArrayList
 
+    # Частичное обновление: забрать из хранилища только объекты из objects.xml (например, чужой
+    # модуль, пока свои объекты в хранилище ещё не приняты). Без objects — всё хранилище.
+    $repoUpdate = '/ConfigurationRepositoryUpdateCfg -force'
+    if ($cmd.objects) {
+        $objects = Join-Path $artDir $cmd.objects
+        if (-not (Test-Path $objects)) { return @{ status = 'error'; error = ('нет файла objects: ' + $objects + ' — обновление НЕ начато') } }
+        $objectsLocal = Join-Path $workRoot (Split-Path $objects -Leaf)
+        Copy-Item $objects $objectsLocal -Force
+        $repoUpdate = '/ConfigurationRepositoryUpdateCfg -objects "' + $objectsLocal + '" -force'
+        [void]$steps.Add(@{ step = 'objects'; file = $cmd.objects })
+    }
+
     $backupName = 'prod-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.cf'
     $backupLocal = Join-Path $workRoot $backupName
     $r = Invoke-Designer 'BackupDumpCfg' ('/DumpCfg "' + $backupLocal + '"') 1800 $false
@@ -1249,32 +1347,15 @@ function Do-UpdateProd($cmd) {
     try { Copy-Item $backupLocal (Join-Path $artDir $backupName) -Force } catch {}
 
     if ($mode -eq 'full') {
-        $fail = Invoke-KillStep $steps
-        if ($fail) { $fail.error += ' — обновление НЕ начато'; $fail.alarm = $true; $fail.backup = $backupName; return $fail }
-
-        $r = Invoke-Designer 'RepoUpdateCfg' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
-        Add-DesignerStep $steps $r
-        if ($r.ExitCode -ne 0 -and (Test-RepoLinkBroken $r.Output)) {
-            # На боевой связь восстанавливаем БЕЗ -forceReplaceCfg: подменять конфигурацию
-            # автоматически нельзя, только установить связь и повторить штатное обновление.
-            if (Repair-RepoLink $steps $false) {
-                $r = Invoke-Designer 'RepoUpdateCfg-retry' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
-                Add-DesignerStep $steps $r
-            }
-        }
-        if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = ('ConfigurationRepositoryUpdateCfg: exit=' + $r.ExitCode); alarm = $true; backup = $backupName; steps = $steps } }
-
-        $r = Invoke-Designer 'UpdateDBCfg' '/UpdateDBCfg' 1800 $false
-        Add-DesignerStep $steps $r
-        if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = ('UpdateDBCfg (full): exit=' + $r.ExitCode + '. Сеансы завершены, БД в промежуточном состоянии — откат руками из ' + $backupName + ', решение человека.'); alarm = $true; backup = $backupName; steps = $steps } }
-        return @{ status = 'ok'; mode = 'full'; note = ('База обновлена в режиме full (сеансы завершены). Бэкап: ' + $backupName); backup = $backupName; steps = $steps }
+        # full: запретить новые сеансы → завершить все сеансы → подтянуть версию → применить монопольно.
+        return (Invoke-WithSessionsDeny $steps { Do-UpdateProdFull $steps $backupName $repoUpdate } @{ alarm = $true; backup = $backupName })
     }
 
-    $r = Invoke-Designer 'RepoUpdateCfg' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
+    $r = Invoke-Designer 'RepoUpdateCfg' $repoUpdate 3600 $true
     Add-DesignerStep $steps $r
     if ($r.ExitCode -ne 0 -and (Test-RepoLinkBroken $r.Output)) {
         if (Repair-RepoLink $steps $false) {
-            $r = Invoke-Designer 'RepoUpdateCfg-retry' '/ConfigurationRepositoryUpdateCfg -force' 3600 $true
+            $r = Invoke-Designer 'RepoUpdateCfg-retry' $repoUpdate 3600 $true
             Add-DesignerStep $steps $r
         }
     }
@@ -1292,6 +1373,28 @@ function Do-UpdateProd($cmd) {
             backup = $backupName; steps = $steps }
     }
     return @{ status = 'ok'; mode = 'hot'; note = ('База обновлена динамически, без завершения сеансов. Бэкап: ' + $backupName); backup = $backupName; steps = $steps }
+}
+
+function Do-UpdateProdFull($steps, $backupName, $repoUpdate) {
+    $fail = Invoke-KillStep $steps
+    if ($fail) { $fail.error += ' — обновление НЕ начато'; $fail.alarm = $true; $fail.backup = $backupName; return $fail }
+
+    $r = Invoke-Designer 'RepoUpdateCfg' $repoUpdate 3600 $true
+    Add-DesignerStep $steps $r
+    if ($r.ExitCode -ne 0 -and (Test-RepoLinkBroken $r.Output)) {
+        # На боевой связь восстанавливаем БЕЗ -forceReplaceCfg: подменять конфигурацию
+        # автоматически нельзя, только установить связь и повторить штатное обновление.
+        if (Repair-RepoLink $steps $false) {
+            $r = Invoke-Designer 'RepoUpdateCfg-retry' $repoUpdate 3600 $true
+            Add-DesignerStep $steps $r
+        }
+    }
+    if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = ('ConfigurationRepositoryUpdateCfg: exit=' + $r.ExitCode); alarm = $true; backup = $backupName; steps = $steps } }
+
+    $r = Invoke-Designer 'UpdateDBCfg' '/UpdateDBCfg' 1800 $false
+    Add-DesignerStep $steps $r
+    if ($r.ExitCode -ne 0) { return @{ status = 'error'; error = ('UpdateDBCfg (full): exit=' + $r.ExitCode + '. Сеансы завершены, БД в промежуточном состоянии — откат руками из ' + $backupName + ', решение человека.'); alarm = $true; backup = $backupName; steps = $steps } }
+    return @{ status = 'ok'; mode = 'full'; note = ('База обновлена в режиме full (сеансы завершены). Бэкап: ' + $backupName); backup = $backupName; steps = $steps }
 }
 
 # --- Основной цикл --------------------------------------------------------------

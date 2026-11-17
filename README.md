@@ -84,7 +84,8 @@
 | Ключ | Назначение |
 |---|---|
 | `hostPattern` | Регулярное выражение по имени машины для автоопределения роли (иначе `-Role`) |
-| `server1c`, `ib`, `ibUser`, `ibPassword` | ИБ и пользователь для пакетного Конфигуратора |
+| `server1c`, `ib`, `ibUser`, `ibPassword` | ИБ и пользователь для пакетного Конфигуратора. Файловая база: `server1c` пустой, в `ib` путь к каталогу базы |
+| `denyCode` | Код разрешения, под которым агент работает, пока на базе стоит запрет новых сеансов (по умолчанию `DEPLOY`) |
 | `repoPath`, `repoUser`, `repoPassword` | Хранилище конфигурации. Пусто, если хранилища нет: команды `pull`/`test`/`commit`/`unlock`/`update-prod`/`repo-bind`/`repo-unbind` отключаются |
 | `platformVersion` | Версия платформы (`8.3.24.1808`) или `auto` |
 | `rasPort`, `clusterAddr` | Локальный `ras` поднимается на `rasPort` и смотрит на `clusterAddr` (кластер может быть на другой машине) |
@@ -108,11 +109,11 @@
 
 | Команда | Что делает | Таймаут |
 |---|---|---|
-| `status` | Свежесть heartbeat агента (локально, без команды) | — |
+| `status` | Свежесть heartbeat агента и чем он занят (локально, без команды) | — |
 | `ping` | Версия агента, роль, хост, платформа, список установленных платформ | 90 с |
 | `sessions [-Ib]` | Сеансы ИБ через `ras`/`rac`, без снятия | 90 с |
 | `kill-sessions [-Ib]` | Снять все сеансы ИБ | 90 с |
-| `com-check -Server1c <хост> [-Ib -IbUser -IbPassword]` | Достижимость ИБ по COM с этой машины: TCP до 1540/1541/1560, версия `comcntr`, CLSID/AppID, учётка службы, одно внешнее соединение | 180 с |
+| `com-check -Server1c <хост> [-Ib -IbUser -IbPassword]` | Достижимость ИБ по COM с этой машины: TCP до 1540/1541/1560, версия `comcntr`, CLSID/AppID, учётка службы, одно внешнее соединение. Без `-Server1c` и с путём в `-Ib` проверяет файловую базу, без TCP | 180 с |
 | `peek -Path <путь> [-Tail N]` | Каталог на сервере списком, файл хвостом | 90 с |
 | `fetch -Path <путь> [-Name]` | Файл с диска сервера в `artifacts` (копирует сам агент, сверяет размер) | 5400 с |
 | `com-exec -ScriptFile <.vbs>` | Выполнить VBScript на сервере (работа с ИБ через `V83.COMConnector`) | 180 с |
@@ -126,11 +127,11 @@
 
 | Команда | Что делает | Таймаут |
 |---|---|---|
-| `pull` | Снять сеансы, `ConfigurationRepositoryUpdateCfg -force`, `UpdateDBCfg`, `DumpCfg` в `artifacts\snapshot-<штамп>.cf` + SHA256 | 5400 с |
-| `test [-Method mergecfg\|loadcfg\|loadfiles]` | Снять сеансы, `ConfigurationRepositoryLock` по `objects.xml`, наложить `release.cf`, `UpdateDBCfg`. **Захватывает объекты в хранилище** | 3600 с |
+| `pull` | Запретить новые сеансы, снять сеансы, `ConfigurationRepositoryUpdateCfg -force`, `UpdateDBCfg`, `DumpCfg` в `artifacts\snapshot-<штамп>.cf` + SHA256 | 5400 с |
+| `test [-Method mergecfg\|loadcfg\|loadfiles]` | Запретить новые сеансы, снять сеансы, `ConfigurationRepositoryLock` по `objects.xml`, наложить `release.cf`, `UpdateDBCfg`. **Захватывает объекты в хранилище** | 3600 с |
 | `commit -Comment "…"` | `ConfigurationRepositoryCommit` по `objects.xml`, затем `Unlock` остаточных. **Помещает версию** | 3600 с |
 | `unlock` | `ConfigurationRepositoryUnlock -force` по `objects.xml` без помещения (откат) | 900 с |
-| `update-prod -Mode hot\|full` | Только роль `prod`. Бэкап `DumpCfg` в `artifacts\prod-backup-*.cf`, затем `hot` (`UpdateDBCfg -Dynamic+`, стоп, если динамически не применилось) или `full` (снять сеансы, обновить монопольно) | 5400 с |
+| `update-prod -Mode hot\|full [-Objects <objects.xml>]` | Только роль `prod`. Бэкап `DumpCfg` в `artifacts\prod-backup-*.cf`, затем `hot` (`UpdateDBCfg -Dynamic+`, стоп, если динамически не применилось) или `full` (запретить новые сеансы, снять сеансы, обновить монопольно). С `-Objects` из хранилища забираются только объекты из списка, без него всё хранилище | 5400 с |
 | `repo-bind` | `ConfigurationRepositoryBindCfg -forceBindAlreadyBindedUser` под учётной записью из конфига; с `-Force` добавляет `-forceReplaceCfg` и `UpdateDBCfg`. Заменяет ручное подключение базы к хранилищу в Конфигураторе. Вручную нужна редко: `pull`, `test`, `commit`, `unlock` и `update-prod` чинят связь сами | 1800 с |
 | `repo-unbind` | `ConfigurationRepositoryUnbindCfg -force`: снять связь с хранилищем, чтобы следующий `pull` привязал базу под пользователем из конфига | 1800 с |
 | `repo-report -NBegin <N> [-NEnd <M>]` | `ConfigurationRepositoryReport … -ReportFormat txt`: история хранилища с версии N (кто, когда и какие объекты помещал). Текст в ответе и файлом в `artifacts`. Базу не меняет, сеансы не снимает | 900 с |
@@ -208,7 +209,13 @@ MCP-транспорт (см. ниже):
   Файл пишется как `.tmp` и переименовывается, чтобы агент не прочитал половину.
 - Ответ: `<роль>\out\<id>.json`, `{ "id", "status": "ok"|"error", "error", "steps": [...] }`.
   Обработанная команда переезжает в `in\done\`.
-- Heartbeat: `<роль>\out\agent-status.json` раз в 60 секунд.
+- Heartbeat: `<роль>\out\agent-status.json` раз в 60 секунд между командами. На время
+  команды в нём лежат `running` (id), `started` и `limit` (срок из `waitSec` команды, это
+  `TimeoutSec` оркестратора). По ним оркестратор отличает занятого агента от мёртвого: команда
+  к занятому встаёт в очередь, к мёртвому возвращает код 2 сразу, без ожидания таймаута.
+- Запрет сеансов: на время `pull`, `test` и `update-prod -Mode full` агент ставит на ИБ запрет
+  новых сеансов и регламентных заданий (`rac infobase update --sessions-deny`) с кодом
+  `denyCode`, сам ходит в базу с `/UC <код>` и снимает запрет в `finally`, даже при сбое.
 - Единственность: `<роль>\out\agent.lock` с PID; новый экземпляр вытесняет старый (`reload`).
 - Логи: агент пишет локально (`%TEMP%\deploy-agent\`), после каждой команды копирует
   в `log\agent-<роль>.log`.
