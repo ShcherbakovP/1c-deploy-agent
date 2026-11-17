@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$AgentVersion = '2.2'
+$AgentVersion = '2.3'
 
 # Ранний выход (роль, папка обмена, конфиг, платформа) в окне не увидеть: при запуске из
 # лаунчера окно закрывается вместе с процессом. Причина ложится в файл — локально
@@ -1349,6 +1349,14 @@ Copy-AgentLogToShare
 $running = $true
 $lastHeartbeat = [datetime]::MinValue
 
+# Heartbeat пишется между командами. Во время команды файл не обновляется, поэтому в нём
+# лежат running (id), started и limit (с): по ним deploy.ps1 отличает занятого агента от мёртвого.
+function Write-Heartbeat([string]$runId = '', [int]$limitSec = 0) {
+    $hb = [ordered]@{ agent = $AgentVersion; role = $Role; host = $env:COMPUTERNAME; time = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'); running = $null; started = $null; limit = $null }
+    if ($runId -ne '') { $hb.running = $runId; $hb.started = $hb.time; $hb.limit = $limitSec }
+    try { [System.IO.File]::WriteAllText((Join-Path $outDir 'agent-status.json'), ($hb | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($true))) } catch {}
+}
+
 while ($running) {
     # Вытеснение: lock захватил другой (более новый) экземпляр — выходим.
     try {
@@ -1358,11 +1366,7 @@ while ($running) {
         }
     } catch {}
 
-    if (((Get-Date) - $lastHeartbeat).TotalSeconds -ge 60) {
-        $hb = @{ agent = $AgentVersion; role = $Role; host = $env:COMPUTERNAME; time = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') } | ConvertTo-Json -Compress
-        try { [System.IO.File]::WriteAllText((Join-Path $outDir 'agent-status.json'), $hb, (New-Object System.Text.UTF8Encoding($true))) } catch {}
-        $lastHeartbeat = Get-Date
-    }
+    if (((Get-Date) - $lastHeartbeat).TotalSeconds -ge 60) { Write-Heartbeat; $lastHeartbeat = Get-Date }
 
     $files = @(Get-ChildItem -Path (Join-Path $inDir '*.json') -File -ErrorAction SilentlyContinue | Sort-Object Name)
     foreach ($f in $files) {
@@ -1373,6 +1377,9 @@ while ($running) {
             $reply = @{ status = 'error'; error = 'битый JSON в команде' }
         } else {
             Log ("Команда {0}: {1}" -f $id, $cmd.command)
+            $limitSec = 21600
+            if ($cmd.waitSec) { $limitSec = [int]$cmd.waitSec }
+            Write-Heartbeat $id $limitSec
             try { $reply = Invoke-Command1 $cmd }
             catch { $reply = @{ status = 'error'; error = ('исключение в агенте: ' + $_.Exception.Message) } }
         }
@@ -1386,6 +1393,7 @@ while ($running) {
         Rename-Item -Path (Join-Path $outDir ($id + '.json.tmp')) -NewName ($id + '.json')
         Move-Item -Path $f.FullName -Destination (Join-Path $doneDir $f.Name) -Force
         Log ("Команда {0} завершена: {1}" -f $id, $reply.status)
+        if ($running) { Write-Heartbeat; $lastHeartbeat = Get-Date }
         Copy-AgentLogToShare
         if (-not $running) { break }
     }

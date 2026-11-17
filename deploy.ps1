@@ -119,17 +119,34 @@ function Log([string]$text) {
 
 function Stop-WithUsage([string]$text) { Write-Host $text; exit 1 }
 
+# --- Состояние агента по heartbeat ------------------------------------------------
+# Агент 2.3+ пишет в agent-status.json running/started/limit на время команды, поэтому старый
+# heartbeat у занятого агента отличим от мёртвого. У агента старше 2.3 этих полей нет.
+# Возвращает State: fresh | busy | dead | stale-old | none и Text для журнала.
+function Get-AgentState {
+    $hbPath = Join-Path $outDir 'agent-status.json'
+    if (-not (Test-Path $hbPath)) { return @{ State = 'none'; Text = 'Heartbeat не найден — агент ни разу не выходил на связь.' } }
+    $hb = $null
+    try { $hb = Get-Content -Path $hbPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+    $age = [int]((Get-Date) - (Get-Item $hbPath).LastWriteTime).TotalSeconds
+    $head = "Агент v{0}, роль {1}, хост {2}: heartbeat {3} с назад." -f $hb.agent, $hb.role, $hb.host, $age
+    if ($age -le 180) { return @{ State = 'fresh'; Text = $head } }
+    if ($null -eq $hb -or -not ($hb.PSObject.Properties.Name -contains 'running')) {
+        return @{ State = 'stale-old'; Text = "$head Агент старой версии: занят долгой командой или не работает." }
+    }
+    if ($hb.running) {
+        $until = ([datetime]$hb.started).AddSeconds([int]$hb.limit + 120)
+        if ((Get-Date) -lt $until) { return @{ State = 'busy'; Text = ("$head Агент выполняет {0} с {1} (предел {2} с)." -f $hb.running, $hb.started, $hb.limit) } }
+        return @{ State = 'dead'; Text = ("$head Команда {0} с {1} превысила предел {2} с: агент, похоже, завис или упал." -f $hb.running, $hb.started, $hb.limit) }
+    }
+    return @{ State = 'dead'; Text = "$head Агент свободен, но heartbeat старый: агент не работает." }
+}
+
 # --- status: свежесть heartbeat агента, без отправки команды --------------------
 if ($Command -eq 'status') {
-    $hbPath = Join-Path $outDir 'agent-status.json'
-    if (Test-Path $hbPath) {
-        $hb = Get-Content -Path $hbPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $age = [int]((Get-Date) - (Get-Item $hbPath).LastWriteTime).TotalSeconds
-        Write-Host ("Агент v{0}, роль {1}, хост {2}: heartbeat {3} с назад." -f $hb.agent, $hb.role, $hb.host, $age)
-        if ($age -gt 180) { Write-Host "ВНИМАНИЕ: heartbeat старше 3 минут — агент, похоже, не работает."; exit 2 }
-        exit 0
-    }
-    Write-Host "Heartbeat не найден — агент ни разу не выходил на связь."
+    $st = Get-AgentState
+    Write-Host $st.Text
+    if ($st.State -in @('fresh', 'busy')) { exit 0 }
     exit 2
 }
 
@@ -273,16 +290,18 @@ if ($Command -eq 'update-prod') {
     Write-Host ("ВНИМАНИЕ: update-prod (режим {0}) обновляет БОЕВУЮ базу из хранилища." -f $Mode)
 }
 
-# --- Старый heartbeat: только предупреждение (ретро 17.11.2026) ------------------
-# Не выход: агент пишет heartbeat лишь между командами, поэтому старый heartbeat бывает и у занятого
-# агента (команда другой сессии в очереди за долгой командой), и у оживающего после запуска.
-# Выход по мёртвому агенту станет возможен, когда агент начнёт писать в agent-status.json
-# текущую команду (running, started, timeout).
-$hbPath = Join-Path $outDir 'agent-status.json'
-if ($Command -ne 'ping' -and (Test-Path $hbPath)) {
-    $age = [int]((Get-Date) - (Get-Item $hbPath).LastWriteTime).TotalSeconds
-    if ($age -gt 180) { Log ("ВНИМАНИЕ: heartbeat агента {0} с назад. Агент занят долгой командой или не работает; команда ставится в очередь." -f $age) }
+# --- Мёртвый агент: не ждать таймаут впустую (ретро 17.11.2026) ------------------
+# Занятый агент (команда другой сессии) не мешает: команда ложится в очередь. Выход только когда
+# агент 2.3+ свободен или его команда давно превысила предел. ping отправляется всегда.
+if ($Command -ne 'ping') {
+    $st = Get-AgentState
+    switch ($st.State) {
+        'busy'      { Log ($st.Text + ' Команда ставится в очередь.') }
+        'stale-old' { Log ('ВНИМАНИЕ: ' + $st.Text + ' Команда ставится в очередь.') }
+        'dead'      { Log ($st.Text + ' Команду не отправляю. Поднять агента (rdp-open.ps1 или agent-start), дождаться свежего heartbeat (deploy.ps1 status), затем повторить.'); exit 2 }
+    }
 }
+$payload.waitSec = $TimeoutSec
 
 # --- Отправка команды и ожидание ответа ------------------------------------------
 $id = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + $Command
