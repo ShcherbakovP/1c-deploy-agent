@@ -88,6 +88,7 @@
 | `denyCode` | Код разрешения, под которым агент работает, пока на базе стоит запрет новых сеансов (по умолчанию `DEPLOY`) |
 | `repoPath`, `repoUser`, `repoPassword` | Хранилище конфигурации. Пусто, если хранилища нет: команды `pull`/`test`/`commit`/`unlock`/`update-prod`/`repo-bind`/`repo-unbind` отключаются |
 | `platformVersion` | Версия платформы (`8.3.24.1808`) или `auto` |
+| `platformRoot` | Необязательно: каталог с версиями платформы при нестандартной установке |
 | `rasPort`, `clusterAddr` | Локальный `ras` поднимается на `rasPort` и смотрит на `clusterAddr` (кластер может быть на другой машине) |
 | `mcpExchange`, `mcpEpf`, `mcpEpfServer` | MCP-транспорт: папка обмена глазами сервера, имя обработки, путь к ней глазами `rphost` (только если кластер не на машине агента) |
 | `mcpLocalDir` | Куда агент кладёт локальную копию обработки для `rphost`, когда кластер на той же машине (по умолчанию `C:\ProgramData\deploy-agent\mcp`) |
@@ -146,7 +147,7 @@
 | `ext-dump -Extension <имя>` | Расширение в `.cfe` в `artifacts` | 900 с |
 | `ext-install -Extension <имя> -Cfe <файл> [-NoBackup] [-Kill]` | Доставка `.cfe`, бэкап прежней версии, `LoadCfg -Extension`, отдельным запуском `UpdateDBCfg -Extension` | 3600 с |
 | `dump-cf` | Конфигурация базы в `.cf` в `artifacts` + SHA256 | 5400 с |
-| `dump-dt -Kill [-Dir]` | `DumpIB` монопольно; файл остаётся на сервере, забирается `fetch` | 21600 с |
+| `dump-dt -Kill [-Dir]` | `DumpIB` монопольно; файл остаётся на сервере, забирается `fetch`. `-NoKill` вместо `-Kill`: без снятия сеансов и без `rac` | 21600 с |
 
 MCP-транспорт (см. ниже):
 

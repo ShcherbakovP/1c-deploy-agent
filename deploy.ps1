@@ -60,6 +60,7 @@ param(
     [string]$Exchange = '',
     [switch]$NoBackup,
     [switch]$Kill,
+    [switch]$NoKill,
     [switch]$Force,
     # mcp-start: разрешить демону выполнение произвольного кода (execute_bsl_code).
     [switch]$AllowCode
@@ -258,8 +259,9 @@ if ($Command -eq 'ext-install') {
 }
 
 if ($Command -eq 'dump-dt') {
-    if (-not $Kill) { Stop-WithUsage 'DumpIB требует монопольного доступа: добавьте -Kill (все сеансы базы будут сняты).' }
-    $payload.kill = $true
+    if ($NoKill) { $payload.nokill = $true }
+    elseif (-not $Kill) { Stop-WithUsage 'DumpIB требует монопольного доступа: добавьте -Kill (все сеансы будут сняты) или -NoKill (без rac; DumpIB откажет, если база занята).' }
+    else { $payload.kill = $true }
     if ($Dir -ne '') { $payload.dir = $Dir }
     Write-Host 'ВНИМАНИЕ: выгрузка ИБ целиком. Все сеансы будут сняты, база встанет на время выгрузки,'
     Write-Host 'файл останется НА СЕРВЕРЕ — забирать отдельной командой fetch.'

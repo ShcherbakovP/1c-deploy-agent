@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$AgentVersion = '2.4'
+$AgentVersion = '2.5'
 
 # Ранний выход (роль, папка обмена, конфиг, платформа) в окне не увидеть: при запуске из
 # лаунчера окно закрывается вместе с процессом. Причина ложится в файл — локально
@@ -92,6 +92,12 @@ function Copy-AgentLogToShare() {
 # platformVersion = 'auto' берёт старшую установленную и годится только для первого запуска
 # на незнакомой машине: ping отдаёт список найденных версий, из них выбирается точная.
 $platformRoots = @('C:\Program Files\1cv8', 'C:\Program Files (x86)\1cv8')
+if (('' + $cfg.platformRoot) -ne '') { $platformRoots = @('' + $cfg.platformRoot) + $platformRoots }
+# Нестандартная установка: каталог платформы берём у запущенного в сеансе 1cv8 (…\<версия>\bin\1cv8.exe).
+foreach ($p in @(Get-Process 1cv8, 1cv8c -ErrorAction SilentlyContinue | Where-Object { $_.Path })) {
+    $runningRoot = Split-Path (Split-Path (Split-Path $p.Path))
+    if ($platformRoots -notcontains $runningRoot) { $platformRoots += $runningRoot }
+}
 $installedPlatforms = @()
 foreach ($root in $platformRoots) {
     if (-not (Test-Path $root)) { continue }
@@ -104,7 +110,18 @@ $installedPlatforms = @($installedPlatforms | Sort-Object -Unique { [version]$_ 
 $wantVersion = '' + $cfg.platformVersion
 $designerExe = $null
 if ($wantVersion -eq '' -or $wantVersion -eq 'auto') {
-    if ($installedPlatforms.Count -eq 0) { Fail 'Платформа 1С не найдена: нет 1cv8.exe в C:\Program Files\1cv8\<версия>\bin — стоп.' }
+    if ($installedPlatforms.Count -eq 0) {
+        # Подсказка для platformRoot в конфиге: где 1cv8.exe лежит на этой машине.
+        $found = @(Get-Process 1cv8, 1cv8c, 1cv8s -ErrorAction SilentlyContinue | ForEach-Object { 'процесс ' + $_.Name + ': ' + $_.Path })
+        foreach ($drive in @(Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[A-Z]:\\$' -and $_.Free -ne $null })) {
+            foreach ($top in @(Get-ChildItem -Path $drive.Root -Directory -ErrorAction SilentlyContinue)) {
+                $found += @(Get-ChildItem -Path $top.FullName -Filter 1cv8.exe -Recurse -Depth 4 -ErrorAction SilentlyContinue |
+                    Select-Object -First 5 | ForEach-Object { $_.FullName })
+            }
+        }
+        Fail ('Платформа 1С не найдена в ' + ($platformRoots -join ', ') + '. Найдено на дисках: ' +
+            (($found | Select-Object -First 20) -join '; ') + ' — задайте platformRoot в конфиге, стоп.')
+    }
     $wantVersion = $installedPlatforms[-1]
     Log ("platformVersion=auto: беру старшую установленную {0} (все: {1})" -f $wantVersion, ($installedPlatforms -join ', '))
 }
@@ -966,8 +983,8 @@ function Do-DumpDt($cmd) {
     # Выгрузка ИБ целиком: монопольный режим и десятки ГБ. Файл остаётся НА СЕРВЕРЕ,
     # на рабочую станцию его тянут отдельной командой fetch (по RDP-каналу это часы).
     $t = Resolve-IbTarget $cmd
-    if ($cmd.kill -ne $true) {
-        return @{ status = 'error'; error = 'DumpIB требует монопольного доступа: повторите с kill=true (все сеансы базы будут сняты)' }
+    if ($cmd.kill -ne $true -and $cmd.nokill -ne $true) {
+        return @{ status = 'error'; error = 'DumpIB требует монопольного доступа: повторите с kill=true (все сеансы базы будут сняты) или nokill=true (без rac)' }
     }
     $dir = Coalesce ('' + $cmd.dir) ('' + $cfg.dumpDir)
     if ([string]::IsNullOrEmpty($dir)) { return @{ status = 'error'; error = 'не задан dir (каталог на диске сервера под .dt) и нет dumpDir в конфиге' } }
@@ -981,7 +998,11 @@ function Do-DumpDt($cmd) {
     } catch {}
 
     $steps = New-Object System.Collections.ArrayList
-    $fail = Invoke-KillStep $steps $t.ib; if ($fail) { return $fail }
+    if ($cmd.nokill -eq $true) {
+        [void]$steps.Add(@{ step = 'kill-sessions'; ok = $true; detail = 'пропущено (nokill): без rac; DumpIB откажет, если база занята' })
+    } else {
+        $fail = Invoke-KillStep $steps $t.ib; if ($fail) { return $fail }
+    }
 
     $name = Coalesce ('' + $cmd.name) ($t.ib + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.dt')
     $file = Join-Path $dir $name
